@@ -300,14 +300,14 @@
         @keyframes spin { to { transform: rotate(360deg); } }
         #importFileInput { display: none; }
 
-        /* Estilos para el modal de ayuda */
-        .help-content {
+        /* Estilos para el modal de ayuda y configuración */
+        .modal-content {
             text-align: left;
             padding: 0 1rem;
             max-height: 60vh;
             overflow-y: auto;
         }
-        .help-content h2 {
+        .modal-content h2 {
             color: var(--primary);
             margin-top: 1.5rem;
             margin-bottom: 0.5rem;
@@ -315,24 +315,32 @@
             padding-bottom: 0.3rem;
             font-family: var(--font-title);
         }
-        .help-content ul {
+        .modal-content ul {
             list-style-position: inside;
             padding-left: 0.5rem;
         }
-        .help-content li {
+        .modal-content li {
             margin-bottom: 0.75rem;
             line-height: 1.5;
             color: var(--text-medium);
         }
-         .help-content li strong {
+         .modal-content li strong {
             color: var(--text-light);
          }
-        .help-content code {
+        .modal-content code {
             background-color: var(--bg-dark);
             padding: 0.2em 0.4em;
             border-radius: 5px;
             font-family: monospace;
             border: 1px solid var(--border-color);
+        }
+        .config-item {
+            margin-bottom: 1rem;
+        }
+        .config-item label {
+            display: block;
+            margin-bottom: 0.5rem;
+            color: var(--text-medium);
         }
     </style>
 </head>
@@ -384,7 +392,7 @@
     let events = [];
     let currentStyle = 'vertical';
 
-    // --- LÓGICA DE LA IA (GEMINI API) ---
+    // --- LÓGICA DE LA IA (GEMINI, MISTRAL, DEEPSEEK) ---
     async function generateTimeline() {
         const userPrompt = document.getElementById('promptInput').value.trim();
         if (!userPrompt) {
@@ -392,69 +400,30 @@
             return;
         }
         
-        const apiKey = getApiKey();
-        if (!apiKey) return; // Detener si no hay API key
+        const provider = getProvider();
+        const apiKey = getApiKey(provider);
+        if (!apiKey) return;
         
         document.querySelector('.loading').style.display = 'flex';
 
-        const structuredPrompt = `Eres un historiador experto. Basado en el tema "${userPrompt}", genera una línea de tiempo con los hitos más importantes. Para cada hito, proporciona una fecha, un título, una descripción concisa (máximo 25 palabras) y un único emoji que lo represente. Importante: si usas comillas dobles (") dentro de una descripción, asegúrate de escaparlas con una barra invertida (\\"). Devuelve la respuesta EXCLUSIVAMENTE en formato JSON, siguiendo el esquema proporcionado.`;
-        const jsonSchema = {
-            type: "OBJECT",
-            properties: {
-                "events": {
-                    type: "ARRAY",
-                    items: {
-                        type: "OBJECT",
-                        properties: {
-                            "date": { "type": "STRING" },
-                            "title": { "type": "STRING" },
-                            "description": { "type": "STRING" },
-                            "icon": { "type": "STRING" }
-                        },
-                        required: ["date", "title", "description", "icon"]
-                    }
-                }
-            },
-            required: ["events"]
-        };
-
         try {
-            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${apiKey}`;
-            const payload = {
-                contents: [{ parts: [{ text: structuredPrompt }] }],
-                generationConfig: {
-                    responseMimeType: "application/json",
-                    responseSchema: jsonSchema
-                }
-            };
-            
-            const response = await fetch(apiUrl, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            });
-
-            if (!response.ok) {
-                const errorBody = await response.json();
-                console.error("API Error Response:", errorBody);
-                throw new Error(`Error de la API: ${response.statusText}`);
-            }
-
-            const result = await response.json();
-            if (!result.candidates || !result.candidates[0].content.parts[0].text) {
-                throw new Error("Respuesta inesperada de la API.");
+            let timelineData;
+            switch (provider) {
+                case 'google':
+                    timelineData = await callGoogleAPI(userPrompt, apiKey);
+                    break;
+                case 'mistral':
+                    timelineData = await callMistralAPI(userPrompt, apiKey);
+                    break;
+                case 'deepseek':
+                    timelineData = await callDeepSeekAPI(userPrompt, apiKey);
+                    break;
+                default:
+                    throw new Error('Proveedor de IA no válido');
             }
             
-            let responseText = result.candidates[0].content.parts[0].text;
-             if (responseText.startsWith("```json")) {
-                responseText = responseText.substring(7, responseText.length - 3).trim();
-            } else if (responseText.startsWith("```")) {
-                 responseText = responseText.substring(3, responseText.length - 3).trim();
-            }
-
-            const timelineData = JSON.parse(responseText);
             if (!timelineData.events || !Array.isArray(timelineData.events)) {
-                throw new Error("El formato JSON recibido no contiene un array de eventos.");
+                throw new Error("La respuesta de la IA no tiene el formato esperado.");
             }
 
             events = timelineData.events.map(e => ({...e, id: crypto.randomUUID()}));
@@ -465,10 +434,56 @@
 
         } catch (error) {
             console.error("Error al generar la línea de tiempo:", error);
-            showToast('error', 'Error de Generación', 'No se pudo crear la línea de tiempo. Revisa tu API Key y que el modelo esté disponible.');
+            showToast('error', 'Error de Generación', error.message);
         } finally {
             document.querySelector('.loading').style.display = 'none';
         }
+    }
+
+    // --- FUNCIONES ESPECÍFICAS PARA CADA API ---
+
+    async function callGoogleAPI(userPrompt, apiKey) {
+        const structuredPrompt = `Eres un historiador experto. Basado en el tema "${userPrompt}", genera una línea de tiempo con los hitos más importantes. Para cada hito, proporciona una fecha, un título, una descripción concisa (máximo 25 palabras) y un único emoji que lo represente. Importante: si usas comillas dobles (") dentro de una descripción, asegúrate de escaparlas con una barra invertida (\\"). Devuelve la respuesta EXCLUSIVAMENTE en formato JSON, siguiendo el esquema proporcionado.`;
+        const jsonSchema = { type: "OBJECT", properties: { "events": { type: "ARRAY", items: { type: "OBJECT", properties: { "date": { "type": "STRING" }, "title": { "type": "STRING" }, "description": { "type": "STRING" }, "icon": { "type": "STRING" } }, required: ["date", "title", "description", "icon"] } } }, required: ["events"] };
+        
+        const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${apiKey}`;
+        const payload = {
+            contents: [{ parts: [{ text: structuredPrompt }] }],
+            generationConfig: { responseMimeType: "application/json", responseSchema: jsonSchema }
+        };
+        const response = await fetch(apiUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+        if (!response.ok) throw new Error(`Error de la API de Google: ${response.statusText}`);
+        const result = await response.json();
+        if (!result.candidates || !result.candidates[0].content.parts[0].text) throw new Error("Respuesta inesperada de la API de Google.");
+        return JSON.parse(result.candidates[0].content.parts[0].text);
+    }
+
+    async function callMistralAPI(userPrompt, apiKey) {
+        const prompt = `Crea una línea de tiempo sobre "${userPrompt}". Devuelve un objeto JSON con una única clave "events". "events" debe ser un array de objetos, donde cada objeto tiene: "date", "title", "description" (máx 25 palabras), y "icon" (un solo emoji).`;
+        const apiUrl = `https://api.mistral.ai/v1/chat/completions`;
+        const payload = {
+            model: 'mistral-large-latest',
+            messages: [{ role: 'user', content: prompt }],
+            response_format: { type: 'json_object' }
+        };
+        const response = await fetch(apiUrl, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` }, body: JSON.stringify(payload) });
+        if (!response.ok) throw new Error(`Error de la API de Mistral: ${response.statusText}`);
+        const result = await response.json();
+        return JSON.parse(result.choices[0].message.content);
+    }
+
+    async function callDeepSeekAPI(userPrompt, apiKey) {
+        const prompt = `Crea una línea de tiempo sobre "${userPrompt}". Devuelve un objeto JSON con una única clave "events". "events" debe ser un array de objetos, donde cada objeto tiene: "date", "title", "description" (máx 25 palabras), y "icon" (un solo emoji).`;
+        const apiUrl = `https://api.deepseek.com/chat/completions`;
+        const payload = {
+            model: 'deepseek-chat',
+            messages: [{ role: 'user', content: prompt }],
+            response_format: { type: 'json_object' }
+        };
+        const response = await fetch(apiUrl, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` }, body: JSON.stringify(payload) });
+        if (!response.ok) throw new Error(`Error de la API de DeepSeek: ${response.statusText}`);
+        const result = await response.json();
+        return JSON.parse(result.choices[0].message.content);
     }
 
     // --- RENDERIZADO Y MANIPULACIÓN DEL DOM ---
@@ -689,25 +704,24 @@
     // --- UTILIDADES, AYUDA Y API KEY ---
     function showHelpModal() {
         const helpHtml = `
-        <div class="help-content">
+        <div class="modal-content">
             <h2>🚀 Primeros Pasos</h2>
             <ul>
-                <li><strong>Genera tu primera línea de tiempo:</strong> Escribe un tema (ej: "La Revolución Francesa") en el campo principal y haz clic en <strong>✨ Generar</strong>.</li>
-                 <li><strong>Configura tu API Key:</strong> Para que la IA funcione, haz clic en <strong>⚙️ Configuración</strong> y pega tu clave de API de Google AI Studio. Solo necesitas hacerlo una vez.</li>
+                <li><strong>Elige un proveedor de IA:</strong> Ve a <strong>⚙️ Configuración</strong>, selecciona tu proveedor preferido (Google, Mistral o DeepSeek) y pega tu clave de API correspondiente.</li>
+                <li><strong>Genera tu primera línea de tiempo:</strong> Escribe un tema (ej: "La Revolución Francesa") y haz clic en <strong>✨ Generar</strong>.</li>
             </ul>
             
             <h2>✍️ Edición y Personalización</h2>
             <ul>
-                <li><strong>Edita un evento:</strong> Simplemente haz clic sobre cualquier evento en la línea de tiempo para modificar su fecha, título, descripción o icono.</li>
-                <li><strong>Añade un evento:</strong> Usa el botón <strong>➕ Añadir Evento</strong> para crear un nuevo hito desde cero.</li>
-                <li><strong>Cambia el estilo:</strong> Usa el selector de <strong>Estilo</strong> para cambiar entre una vista vertical u horizontal.</li>
+                <li><strong>Edita un evento:</strong> Haz clic sobre cualquier evento para modificarlo.</li>
+                <li><strong>Añade un evento:</strong> Usa el botón <strong>➕ Añadir Evento</strong> para crear un hito desde cero.</li>
             </ul>
 
             <h2>💾 Gestión de Datos</h2>
             <ul>
-                <li><strong>Guardado automático:</strong> Tu trabajo se guarda automáticamente en el navegador. ¡No te preocupes por perderlo!</li>
-                <li><strong>Importar/Exportar:</strong> Usa los botones <strong>📂 Importar</strong> y <strong>💾 Exportar</strong> para guardar tus líneas de tiempo como un archivo <code>.json</code> y compartirlas o tener copias de seguridad.</li>
-                <li><strong>Capturar como imagen:</strong> Con el botón <strong>📷 Capturar</strong>, puedes descargar una imagen PNG de alta calidad de tu línea de tiempo.</li>
+                <li><strong>Guardado automático:</strong> Tu trabajo se guarda en el navegador.</li>
+                <li><strong>Importar/Exportar:</strong> Usa los botones <strong>📂 Importar</strong> y <strong>💾 Exportar</strong> para guardar y compartir tus líneas de tiempo.</li>
+                <li><strong>Capturar como imagen:</strong> Descarga una imagen PNG de tu trabajo con el botón <strong>📷 Capturar</strong>.</li>
             </ul>
         </div>
         `;
@@ -721,26 +735,51 @@
     }
 
     async function showApiKeyModal() {
-        const { value: apiKey } = await Swal.fire({
-            title: 'Configurar API Key de Gemini',
-            input: 'password',
-            inputPlaceholder: 'Ingresa tu API Key aquí',
-            inputValue: localStorage.getItem('geminiApiKey_chronoCraft') || '',
+        const currentProvider = getProvider();
+        const { value: formValues } = await Swal.fire({
+            title: 'Configuración de IA',
+            html: `
+            <div class="modal-content">
+                <div class="config-item">
+                    <label for="swal-provider">Proveedor de IA</label>
+                    <select id="swal-provider" class="swal2-select">
+                        <option value="google" ${currentProvider === 'google' ? 'selected' : ''}>Google (Gemini)</option>
+                        <option value="mistral" ${currentProvider === 'mistral' ? 'selected' : ''}>Mistral</option>
+                        <option value="deepseek" ${currentProvider === 'deepseek' ? 'selected' : ''}>DeepSeek</option>
+                    </select>
+                </div>
+                <div class="config-item">
+                    <label for="swal-apikey">Clave de API</label>
+                    <input id="swal-apikey" type="password" class="swal2-input" placeholder="Ingresa tu clave de API aquí" value="${getApiKey(currentProvider, false) || ''}">
+                </div>
+            </div>
+            `,
+            focusConfirm: false,
             showCancelButton: true,
             confirmButtonText: 'Guardar',
-            ...getSwalTheme()
+            preConfirm: () => {
+                return {
+                    provider: document.getElementById('swal-provider').value,
+                    apiKey: document.getElementById('swal-apikey').value
+                }
+            }
         });
 
-        if (apiKey) {
-            localStorage.setItem('geminiApiKey_chronoCraft', apiKey);
-            showToast('success', 'API Key guardada');
+        if (formValues) {
+            localStorage.setItem('ai_provider', formValues.provider);
+            localStorage.setItem(`apiKey_${formValues.provider}`, formValues.apiKey);
+            showToast('success', 'Configuración guardada');
         }
     }
 
-    function getApiKey() {
-        const apiKey = localStorage.getItem('geminiApiKey_chronoCraft');
-        if (!apiKey) {
-            showToast('warning', 'API Key no configurada', 'Por favor, configura tu API Key.');
+    function getProvider() {
+        return localStorage.getItem('ai_provider') || 'deepseek';
+    }
+
+    function getApiKey(provider, showWarning = true) {
+        const apiKey = localStorage.getItem(`apiKey_${provider}`);
+        if (!apiKey && showWarning) {
+            showToast('warning', `Clave de API para ${provider} no configurada.`);
             showApiKeyModal();
             return null;
         }
@@ -750,8 +789,8 @@
     const Toast = Swal.mixin({
         toast: true, position: 'top-end', showConfirmButton: false, timer: 3000, timerProgressBar: true
     });
-    function showToast(icon, title) {
-        Toast.fire({ icon, title, background: 'var(--bg-light)', color: 'var(--text-light)' });
+    function showToast(icon, title, text) {
+        Toast.fire({ icon, title, text, background: 'var(--bg-light)', color: 'var(--text-light)' });
     }
     function getSwalTheme() {
         return {
